@@ -57,25 +57,811 @@
 - ![DOCX](https://img.shields.io/badge/DOCX-Word%20Export-blue) - Word document generation
 - ![File Saver](https://img.shields.io/badge/FileSaver-Download-green) - Client-side file downloads
 
-## 🏗️ Architecture Overview
+## 🏗️ Code Architecture & Implementation
 
-```mermaid
-graph TD
-    A[User Interface] --> B[React Components]
-    B --> C[Firebase Auth]
-    B --> D[Firestore Database]
-    B --> E[Gemini AI API]
-    B --> F[Export Engine]
+### **Component Architecture**
+
+The application follows a **modular component architecture** with clear separation of concerns:
+
+```javascript
+// Main App Structure
+App.jsx (Root)
+├── AuthProvider (Context)
+├── ErrorBoundary (Error Handling)
+├── ProtectedRoute (Route Guard)
+├── DashboardHeader (Navigation)
+└── ResumeBuilder (Main Component)
+```
+
+### **Core Components Breakdown**
+
+#### 🔐 **Authentication System**
+```javascript
+// src/contexts/AuthContext.jsx
+const AuthContext = createContext();
+
+export function AuthProvider({ children }) {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  
+  // Firebase Auth Methods
+  async function signup(email, password, displayName) {
+    const result = await createUserWithEmailAndPassword(auth, email, password);
+    await updateProfile(result.user, { displayName });
+    return result;
+  }
+  
+  // Google OAuth Integration
+  async function loginWithGoogle() {
+    return await signInWithPopup(auth, googleProvider);
+  }
+}
+```
+
+**Key Features:**
+- **Real-time Auth State**: Uses `onAuthStateChanged` for persistent sessions
+- **Error Handling**: Comprehensive error messages for all auth scenarios
+- **Google OAuth**: Seamless Google sign-in integration
+- **Profile Management**: Display name and email management
+
+#### 📝 **Resume Builder Component**
+```javascript
+// src/components/ResumeBuilder.jsx
+const ResumeBuilder = () => {
+  // State Management
+  const [resumeData, setResumeData] = useState({
+    personalInfo: { name: '', email: '', phone: '', location: '', summary: '' },
+    experience: [], education: [], projects: [], certifications: [], skills: []
+  });
+  
+  // AI Integration
+  const callGeminiAPI = async (prompt, type) => {
+    const response = await fetch(geminiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.7, topK: 40, topP: 0.95 }
+      })
+    });
+    return response.json();
+  };
+  
+  // Auto-save Implementation
+  useEffect(() => {
+    const timeoutId = setTimeout(async () => {
+      if (currentResumeId && resumeData) {
+        await ResumeFirestoreService.updateResume(currentResumeId, resumeData);
+      }
+    }, 3000);
+    return () => clearTimeout(timeoutId);
+  }, [resumeData, currentResumeId]);
+};
+```
+
+**Advanced Features:**
+- **Real-time Preview**: Live updates as user types
+- **Smart Auto-save**: Debounced saving every 3 seconds
+- **Section Management**: Dynamic addition/removal of resume sections
+- **Template System**: Switchable professional templates
+- **Validation**: Real-time form validation with error states
+
+### **🤖 AI Integration Deep Dive**
+
+#### **Gemini AI Service**
+```javascript
+// AI Content Generation Pipeline
+const generateAIContent = async (section, context) => {
+  let prompt = '';
+  const jobAnalysis = aiSuggestions.jobAnalysis;
+  
+  switch (section) {
+    case 'summary':
+      prompt = `Create a professional resume summary for: ${context}
+      Target Role: ${jobAnalysis?.role_summary}
+      Experience Level: ${jobAnalysis?.experience_level}
+      Key Requirements: ${jobAnalysis?.key_requirements?.join(', ')}
+      Make it compelling and 2-3 sentences. Return ONLY the summary text.`;
+      break;
+      
+    case 'experience':
+      prompt = `Generate 3-4 professional bullet points for: ${context}
+      Optimize for: ${jobAnalysis?.role_summary}
+      Include keywords: ${jobAnalysis?.suggested_keywords?.join(', ')}
+      Use action verbs and quantify achievements.`;
+      break;
+  }
+  
+  return await callGeminiAPI(prompt, section);
+};
+```
+
+**AI Features Implementation:**
+- **Context-Aware Generation**: Uses job description for targeted content
+- **Fallback System**: Provides default content when API fails
+- **JSON Response Parsing**: Handles both structured and text responses
+- **Rate Limiting**: Built-in request throttling
+
+#### **ATS Optimization Engine**
+```javascript
+// ATS Analysis Implementation
+const analyzeATS = async () => {
+  const resumeText = generateResumeText();
+  const prompt = `
+    Analyze this resume against the job description for ATS optimization.
     
-    C --> G[User Management]
-    D --> H[Resume Storage]
-    E --> I[Content Generation]
-    F --> J[PDF/Word Export]
+    Job Description: ${jobDescription}
+    Resume Content: ${resumeText}
     
-    G --> K[Login/Signup]
-    H --> L[Auto-save]
-    I --> M[ATS Optimization]
-    J --> N[Download]
+    Provide analysis in JSON format:
+    {
+      "score": 65,
+      "strengths": ["Relevant experience", "Good use of action verbs"],
+      "improvements": ["Add more keywords", "Include quantified achievements"],
+      "keywords": {
+        "present": ["JavaScript", "React", "Problem solving"],
+        "missing": ["Python", "AWS", "Agile methodology"]
+      }
+    }
+  `;
+  
+  const analysis = await callGeminiAPI(prompt, 'ats');
+  return parseGeminiJSON(analysis);
+};
+```
+
+### **🔥 Firebase Integration**
+
+#### **Firestore Database Service**
+```javascript
+// src/services/firestoreService.js
+export class ResumeFirestoreService {
+  
+  // Optimized Query (No Composite Index Required)
+  static async getUserResumes(userId) {
+    const resumesQuery = query(
+      collection(db, RESUMES_COLLECTION),
+      where('userId', '==', userId)
+    );
+    
+    const querySnapshot = await getDocs(resumesQuery);
+    const resumes = [];
+    
+    querySnapshot.forEach((doc) => {
+      const data = doc.data();
+      resumes.push({
+        id: doc.id,
+        ...data,
+        createdAt: data.createdAt?.toDate() || new Date(),
+        updatedAt: data.updatedAt?.toDate() || new Date()
+      });
+    });
+    
+    // Client-side sorting (avoids Firestore composite index)
+    return resumes.sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+  
+  // Auto-save with Debouncing
+  static autoSaveTimeout = null;
+  
+  static autoSave(resumeId, resumeData, delay = 2000) {
+    if (this.autoSaveTimeout) clearTimeout(this.autoSaveTimeout);
+    
+    this.autoSaveTimeout = setTimeout(async () => {
+      try {
+        if (resumeId) {
+          await this.updateResume(resumeId, resumeData);
+          console.log('💾 Auto-saved resume');
+        }
+      } catch (error) {
+        console.error('❌ Auto-save failed:', error);
+      }
+    }, delay);
+  }
+}
+```
+
+**Database Schema:**
+```javascript
+// Firestore Collections Structure
+resumes/ {
+  resumeId: {
+    userId: string,
+    title: string,
+    resumeData: {
+      personalInfo: {...},
+      experience: [...],
+      education: [...],
+      projects: [...],
+      certifications: [...],
+      skills: [...]
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    isTemplate: boolean
+  }
+}
+
+users/ {
+  userId: {
+    profile: {...},
+    preferences: {...},
+    updatedAt: timestamp
+  }
+}
+```
+
+### **📄 Document Export System**
+
+#### **PDF Generation**
+```javascript
+// Professional PDF Export
+const exportToPDF = () => {
+  const resumeElement = document.getElementById('resume-preview');
+  const currentTemplate = templates[selectedTemplate];
+  
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .header { 
+          background: ${currentTemplate.headerBg}; 
+          color: white; 
+          padding: 1.5rem; 
+        }
+        .section-title { 
+          border-bottom: 2px solid #e5e7eb; 
+          padding-bottom: 0.25rem; 
+        }
+        @media print { 
+          body { -webkit-print-color-adjust: exact; } 
+        }
+      </style>
+    </head>
+    <body>${generateFormattedContent()}</body>
+    </html>
+  `;
+  
+  const blob = new Blob([htmlContent], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  window.open(url, '_blank');
+};
+```
+
+#### **Word Document Export**
+```javascript
+// Advanced Word Export with DOCX library
+const exportToWord = async () => {
+  const doc = new Document({
+    styles: { paragraphStyles: [/* Custom styles */] },
+    sections: [{
+      children: await generateWordContent()
+    }]
+  });
+  
+  const blob = await Packer.toBlob(doc);
+  saveAs(blob, `${resumeData.personalInfo.name}_Resume.docx`);
+};
+
+// Word Content Generation
+const generateWordContent = async () => {
+  const children = [];
+  
+  // Header with styling
+  children.push(new Paragraph({
+    children: [new TextRun({
+      text: resumeData.personalInfo.name,
+      bold: true, size: 36, color: "FFFFFF"
+    })],
+    alignment: AlignmentType.CENTER,
+    shading: { type: ShadingType.SOLID, color: "2563EB" }
+  }));
+  
+  return children;
+};
+```
+
+### **🎨 Template System**
+
+#### **Dynamic Template Configuration**
+```javascript
+// Template System Implementation
+const templates = {
+  modern: {
+    name: 'Modern Professional',
+    colors: 'bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500',
+    headerBg: 'bg-blue-600',
+    textColor: 'text-gray-800',
+    accentColor: '#2563eb'
+  },
+  creative: {
+    name: 'Creative Design',
+    colors: 'bg-gradient-to-br from-purple-50 to-pink-50 border-l-4 border-purple-500',
+    headerBg: 'bg-purple-600',
+    textColor: 'text-gray-800',
+    accentColor: '#9333ea'
+  }
+};
+
+// Dynamic Template Application
+const applyTemplate = (templateKey) => {
+  const template = templates[templateKey];
+  return {
+    containerClass: template.colors,
+    headerStyle: { backgroundColor: template.accentColor },
+    textClass: template.textColor
+  };
+};
+```
+
+### **⚡ Performance Optimizations**
+
+#### **Code Splitting & Lazy Loading**
+```javascript
+// vite.config.js - Advanced Bundling
+export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('react') || id.includes('react-dom')) {
+              return 'react-vendor';
+            }
+            if (id.includes('firebase')) {
+              return 'firebase-vendor';
+            }
+            if (id.includes('docx') || id.includes('file-saver')) {
+              return 'export-vendor';
+            }
+            return 'vendor';
+          }
+        }
+      }
+    },
+    chunkSizeWarningLimit: 1000
+  }
+});
+```
+
+#### **State Management Optimization**
+```javascript
+// Optimized State Updates
+const updatePersonalInfo = useCallback((field, value) => {
+  setResumeData(prev => ({
+    ...prev,
+    personalInfo: { ...prev.personalInfo, [field]: value }
+  }));
+  validateField('personal', field, value);
+}, []);
+
+// Debounced Auto-save
+const debouncedSave = useMemo(
+  () => debounce(async (data) => {
+    await ResumeFirestoreService.updateResume(currentResumeId, data);
+  }, 3000),
+  [currentResumeId]
+);
+```
+
+### **🛡️ Error Handling & Validation**
+
+#### **Comprehensive Error Boundary**
+```javascript
+// Error Boundary Implementation
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Error Boundary caught:', error, errorInfo);
+    // Send to monitoring service
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return <ErrorFallback error={this.state.error} />;
+    }
+    return this.props.children;
+  }
+}
+```
+
+#### **Form Validation System**
+```javascript
+// Real-time Validation
+const validateField = (section, field, value) => {
+  const errors = { ...validationErrors };
+  const key = `${section}.${field}`;
+
+  if (!value.trim()) {
+    if (['name', 'email'].includes(field)) {
+      errors[key] = `${field.charAt(0).toUpperCase() + field.slice(1)} is required`;
+    }
+  } else {
+    if (field === 'email' && !validateEmail(value)) {
+      errors[key] = 'Please enter a valid email address';
+    } else if (field === 'phone' && value && !validatePhone(value)) {
+      errors[key] = 'Please enter a valid phone number';
+    } else {
+      delete errors[key];
+    }
+  }
+
+  setValidationErrors(errors);
+};
+
+// Email Validation Regex
+const validateEmail = (email) => {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
+};
+```
+
+### **📱 Responsive Design System**
+
+#### **Mobile-First Approach**
+```javascript
+// Responsive Layout Implementation
+const ResponsiveLayout = () => {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 1024);
+    };
+    
+    window.addEventListener('resize', checkMobile);
+    checkMobile();
+    
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
+  return (
+    <div className="flex flex-col lg:flex-row min-h-screen">
+      {/* Mobile Sidebar Overlay */}
+      {sidebarOpen && isMobile && (
+        <div className="lg:hidden fixed inset-0 z-40 bg-black bg-opacity-50" 
+             onClick={() => setSidebarOpen(false)} />
+      )}
+      
+      {/* Responsive Editor Panel */}
+      <div className={`
+        fixed lg:relative inset-y-0 left-0 z-50 lg:z-0
+        w-full sm:w-96 lg:w-1/2 xl:w-2/5
+        transform transition-transform duration-300 ease-in-out lg:transform-none
+        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
+      `}>
+        {/* Editor Content */}
+      </div>
+    </div>
+  );
+};
+```
+
+### **🔍 Advanced Features**
+
+#### **Real-time Collaboration (Future)**
+```javascript
+// WebSocket Integration for Real-time Updates
+const useRealtimeUpdates = (resumeId) => {
+  useEffect(() => {
+    if (!resumeId) return;
+    
+    const unsubscribe = onSnapshot(
+      doc(db, 'resumes', resumeId),
+      (doc) => {
+        if (doc.exists()) {
+          const data = doc.data();
+          setResumeData(data.resumeData);
+        }
+      }
+    );
+    
+    return unsubscribe;
+  }, [resumeId]);
+};
+```
+
+#### **Advanced Analytics**
+```javascript
+// Usage Analytics Implementation
+const trackUserAction = (action, metadata = {}) => {
+  // Firebase Analytics
+  logEvent(analytics, action, {
+    timestamp: new Date().toISOString(),
+    userId: currentUser?.uid,
+    ...metadata
+  });
+};
+
+// Track AI Usage
+const trackAIUsage = (feature, success) => {
+  trackUserAction('ai_feature_used', {
+    feature,
+    success,
+    timestamp: Date.now()
+  });
+};
+```
+
+## 🏗️ Project Structure
+
+```
+AI-Resume-Builder/
+├── 📁 src/
+│   ├── 📁 components/              # React Components
+│   │   ├── 🔐 LoginPage.jsx        # Authentication UI
+│   │   │   ├── Email/Password form
+│   │   │   ├── Google OAuth button
+│   │   │   ├── Form validation
+│   │   │   └── Error handling
+│   │   ├── 📝 SignupPage.jsx       # User Registration
+│   │   │   ├── Multi-step form
+│   │   │   ├── Password strength indicator
+│   │   │   ├── Terms acceptance
+│   │   │   └── Email verification
+│   │   ├── 🏠 WelcomePage.jsx      # Landing Page
+│   │   │   ├── Hero section with animations
+│   │   │   ├── Feature showcase
+│   │   │   ├── Testimonials carousel
+│   │   │   ├── Pricing tiers
+│   │   │   └── Footer with links
+│   │   └── 🔧 ResumeBuilder.jsx    # Main Builder (2000+ lines)
+│   │       ├── State management (12 useState hooks)
+│   │       ├── AI integration (5 different prompts)
+│   │       ├── Real-time preview
+│   │       ├── Auto-save functionality
+│   │       ├── Template system (3 templates)
+│   │       ├── Export system (PDF/Word)
+│   │       ├── ATS optimization
+│   │       ├── Form validation
+│   │       └── Mobile responsive design
+│   │
+│   ├── 📁 contexts/                # React Context API
+│   │   └── 🔐 AuthContext.jsx      # Authentication State
+│   │       ├── Firebase Auth integration
+│   │       ├── User session management
+│   │       ├── Error handling (10+ error types)
+│   │       ├── Google OAuth setup
+│   │       └── Auth state persistence
+│   │
+│   ├── 📁 firebase/                # Firebase Configuration
+│   │   └── ⚙️ config.js            # Firebase Setup
+│   │       ├── Environment variables
+│   │       ├── Auth configuration
+│   │       ├── Firestore setup
+│   │       ├── Google provider config
+│   │       └── Error handling
+│   │
+│   ├── 📁 services/                # External Services
+│   │   └── 🗄️ firestoreService.js  # Database Operations
+│   │       ├── CRUD operations for resumes
+│   │       ├── User profile management
+│   │       ├── Auto-save with debouncing
+│   │       ├── Query optimization
+│   │       ├── Error handling
+│   │       └── Data validation
+│   │
+│   ├── 📁 pages/api/               # API Routes
+│   │   └── 🤖 gemini.js            # AI API Integration
+│   │       ├── Gemini API calls
+│   │       ├── Request validation
+│   │       ├── Error handling
+│   │       ├── Fallback responses
+│   │       └── Rate limiting
+│   │
+│   ├── 📱 App.jsx                  # Main Application
+│   │   ├── Error boundary
+│   │   ├── Route protection
+│   │   ├── Loading states
+│   │   ├── Offline mode handling
+│   │   └── Header with user menu
+│   │
+│   ├── 🚀 main.jsx                 # Application Entry Point
+│   │   ├── React 19 integration
+│   │   ├── StrictMode wrapper
+│   │   └── DOM rendering
+│   │
+│   └── 🎨 index.css                # Global Styles
+│       ├── Tailwind CSS imports
+│       ├── Custom animations
+│       └── Print styles
+│
+├── 📄 package.json                # Dependencies & Scripts
+│   ├── 25+ production dependencies
+│   ├── 15+ development dependencies
+│   ├── Build scripts
+│   └── ESLint configuration
+│
+├── ⚙️ vite.config.js              # Build Configuration
+│   ├── Plugin configuration
+│   ├── Code splitting setup
+│   ├── Bundle optimization
+│   └── Development server config
+│
+├── 🌍 .env                        # Environment Variables
+│   ├── Firebase configuration
+│   ├── Gemini API key
+│   └── Development settings
+│
+└── 📝 README.md                   # Documentation
+    ├── Setup instructions
+    ├── API documentation
+    ├── Architecture overview
+    └── Contributing guidelines
+```
+
+### **Code Quality & Best Practices**
+
+#### **ESLint Configuration**
+```javascript
+// eslint.config.js
+export default [
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  {
+    files: ['**/*.{js,jsx,ts,tsx}'],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+    },
+    plugins: {
+      'react-hooks': reactHooks,
+      'react-refresh': reactRefresh,
+    },
+    rules: {
+      ...reactHooks.configs.recommended.rules,
+      'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
+    },
+  },
+];
+```
+
+#### **TypeScript Integration (Future)**
+```typescript
+// types/resume.ts
+interface ResumeData {
+  personalInfo: PersonalInfo;
+  experience: Experience[];
+  education: Education[];
+  projects: Project[];
+  certifications: Certification[];
+  skills: string[];
+}
+
+interface PersonalInfo {
+  name: string;
+  email: string;
+  phone?: string;
+  location?: string;
+  summary?: string;
+}
+
+interface Experience {
+  id: string;
+  company: string;
+  position: string;
+  duration: string;
+  description: string;
+}
+```
+
+### **Testing Strategy**
+
+#### **Unit Testing Setup**
+```javascript
+// __tests__/components/ResumeBuilder.test.jsx
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { ResumeBuilder } from '../components/ResumeBuilder';
+import { AuthProvider } from '../contexts/AuthContext';
+
+describe('ResumeBuilder', () => {
+  test('renders personal information form', () => {
+    render(
+      <AuthProvider>
+        <ResumeBuilder />
+      </AuthProvider>
+    );
+    
+    expect(screen.getByLabelText(/full name/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
+  });
+  
+  test('auto-saves on content change', async () => {
+    const mockSave = jest.fn();
+    jest.spyOn(ResumeFirestoreService, 'updateResume').mockImplementation(mockSave);
+    
+    render(<ResumeBuilder />);
+    
+    fireEvent.change(screen.getByLabelText(/full name/i), { 
+      target: { value: 'John Doe' } 
+    });
+    
+    await waitFor(() => expect(mockSave).toHaveBeenCalled(), { timeout: 4000 });
+  });
+});
+```
+
+#### **Integration Testing**
+```javascript
+// __tests__/integration/auth.test.jsx
+describe('Authentication Flow', () => {
+  test('complete signup process', async () => {
+    render(<App />);
+    
+    fireEvent.click(screen.getByText(/get started/i));
+    fireEvent.change(screen.getByLabelText(/email/i), { 
+      target: { value: 'test@example.com' } 
+    });
+    fireEvent.change(screen.getByLabelText(/password/i), { 
+      target: { value: 'password123' } 
+    });
+    fireEvent.click(screen.getByText(/create account/i));
+    
+    await waitFor(() => {
+      expect(screen.getByText(/resume builder/i)).toBeInTheDocument();
+    });
+  });
+});
+```
+
+### **Performance Monitoring**
+
+#### **Bundle Analysis**
+```javascript
+// Bundle size analysis
+import { defineConfig } from 'vite';
+import { visualizer } from 'rollup-plugin-visualizer';
+
+export default defineConfig({
+  plugins: [
+    visualizer({
+      filename: 'dist/stats.html',
+      open: true,
+      gzipSize: true,
+      brotliSize: true,
+    }),
+  ],
+});
+```
+
+#### **Performance Metrics**
+```javascript
+// Performance monitoring
+const measurePerformance = (name, fn) => {
+  return async (...args) => {
+    const start = performance.now();
+    const result = await fn(...args);
+    const end = performance.now();
+    
+    console.log(`${name} took ${end - start} milliseconds`);
+    
+    // Send to analytics
+    trackUserAction('performance_metric', {
+      operation: name,
+      duration: end - start,
+      timestamp: Date.now()
+    });
+    
+    return result;
+  };
+};
+
+// Usage
+const saveResumeWithMetrics = measurePerformance(
+  'save_resume',
+  ResumeFirestoreService.saveResume
+);
 ```
 
 ## 🚦 Getting Started
@@ -198,32 +984,6 @@ Watch our comprehensive tutorial series on YouTube:
 - Advanced AI features and optimization
 - Export options and best practices
 - ATS optimization strategies
-
-## 🏗️ Project Structure
-
-```
-AI-Resume-Builder/
-├── 📁 src/
-│   ├── 📁 components/          # React components
-│   │   ├── LoginPage.jsx       # Authentication
-│   │   ├── SignupPage.jsx      # User registration
-│   │   ├── WelcomePage.jsx     # Landing page
-│   │   └── ResumeBuilder.jsx   # Main resume builder
-│   ├── 📁 contexts/            # React contexts
-│   │   └── AuthContext.jsx     # Authentication context
-│   ├── 📁 firebase/            # Firebase configuration
-│   │   └── config.js           # Firebase setup
-│   ├── 📁 services/            # External services
-│   │   └── firestoreService.js # Database operations
-│   ├── 📁 pages/api/           # API routes
-│   │   └── gemini.js           # AI API integration
-│   ├── App.jsx                 # Main app component
-│   ├── main.jsx               # Entry point
-│   └── index.css              # Global styles
-├── 📄 package.json            # Dependencies
-├── 📄 vite.config.js          # Build configuration
-└── 📄 .env                    # Environment variables
-```
 
 ## 🤝 Contributing
 
